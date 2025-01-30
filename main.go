@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,57 +10,97 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sync"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const WIKIURL = "https://www.pcgamingwiki.com/w/api.php"
+const CMLIMIT = 50
+
+const (
+	dropGamesTable   = `DROP TABLE IF EXISTS Saves;`
+	createGamesTable = `CREATE TABLE Saves (
+		PageId INTEGER PRIMARY KEY,
+		Game TEXT,
+		SaveLocation TEXT
+	);`
+)
+
+var db *sql.DB
 
 func main() {
-	// baseurl, err := url.Parse(WIKIURL)
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
+	var err error
+	db, err = sql.Open("sqlite3", "saveLocations.db")
+	if err != nil {
 
-	// params := baseurl.Query()
-	// params.Add("action", "query")
-	// params.Add("list", "categorymembers")
-	// params.Add("cmtitle", "Category:Games")
-	// params.Add("cmlimit", "50")
-	// params.Add("format", "json")
+	}
+	defer db.Close()
 
-	// baseurl.RawQuery = params.Encode()
+	_, err = db.Exec(dropGamesTable)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	_, err = db.Exec(createGamesTable)
+	if err != nil {
+		log.Fatalln(err)
+	}
 
-	// response, err := http.Get(baseurl.String())
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
-	// defer response.Body.Close()
+	baseurl, err := url.Parse(WIKIURL)
+	if err != nil {
+		log.Fatalln(err)
+	}
 
-	// buf := bytes.NewBuffer(nil)
-	// io.Copy(buf, response.Body)
-	// // log.Println(string(buf.Bytes()))
+	params := baseurl.Query()
+	params.Add("action", "query")
+	params.Add("list", "categorymembers")
+	params.Add("cmtitle", "Category:Games")
+	params.Add("cmlimit", fmt.Sprintf("%d", CMLIMIT))
+	params.Add("format", "json")
 
-	// var data map[string]interface{}
-	// err = json.Unmarshal(buf.Bytes(), &data)
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
-	GetGameSave(573)
-	// params.Add("cmcontinue", data["continue"].(map[string]interface{})["cmcontinue"].(string))
-	// params.Add("continue", data["continue"].(map[string]interface{})["continue"].(string))
+	baseurl.RawQuery = params.Encode()
 
-	// baseurl.RawQuery = params.Encode()
-	// secondResponse, err := http.Get(baseurl.String())
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
-	// defer secondResponse.Body.Close()
+	continuePresent := true
+	for continuePresent {
+		log.Printf("new batch of %d\n", CMLIMIT)
+		response, err := http.Get(baseurl.String())
+		if err != nil {
+			log.Fatalln(err)
+		}
+		defer response.Body.Close()
 
-	// buf = bytes.NewBuffer(nil)
-	// io.Copy(buf, secondResponse.Body)
-	// log.Println(string(buf.Bytes()))
+		buf := bytes.NewBuffer(nil)
+		io.Copy(buf, response.Body)
+		// log.Println(string(buf.Bytes()))
+
+		var data map[string]interface{}
+		err = json.Unmarshal(buf.Bytes(), &data)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		query := data["query"].(map[string]interface{})
+		catergorymembers := query["categorymembers"].([]interface{})
+
+		var waitGroup sync.WaitGroup
+		waitGroup.Add(CMLIMIT)
+		for i := 0; i < CMLIMIT; i++ {
+			member := catergorymembers[i].(map[string]interface{})
+			go saveGameSaveById(member["pageid"].(float64), member["title"].(string), &waitGroup) // use goroutine here to speed up query
+		}
+
+		waitGroup.Wait()
+
+		if continueJson, ok := data["continue"].(map[string]interface{}); ok {
+			params.Set("cmcontinue", continueJson["cmcontinue"].(string))
+			params.Set("continue", continueJson["continue"].(string))
+			baseurl.RawQuery = params.Encode()
+		} else {
+			break
+		}
+	}
 }
 
-func GetGameSave(id float64) {
+func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 	baseurl, err := url.Parse(WIKIURL)
 	if err != nil {
 		log.Fatalln(err)
@@ -99,6 +140,10 @@ func GetGameSave(id float64) {
 			break
 		}
 	}
+	if saveGameIndex == "" {
+		waitGroup.Done()
+		return
+	}
 
 	params = url.Values{}
 	params.Add("action", "parse")
@@ -133,5 +178,31 @@ func GetGameSave(id float64) {
 	}
 
 	matches := regex.FindAllStringSubmatch(text, -1)
-	log.Println(matches)
+	saves := make(map[string]string)
+	gameHasAnySaves := false
+	for i := 0; i < len(matches); i++ {
+		//only make an entry if the second capture group returned a non empty string
+		if (len(matches[i]) >= 3) && (matches[i][2] != "") {
+			saves[matches[i][1]] = matches[i][2]
+
+			if !gameHasAnySaves {
+				//only set when it wasn't previously true
+				gameHasAnySaves = true
+			}
+		}
+	}
+
+	if gameHasAnySaves { //don't bother saving the game when it doesn't have any know save locations
+		savesJson, err := json.Marshal(saves)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		_, err = db.Exec("INSERT INTO Saves VALUES(?, ?, ?)", fmt.Sprintf("%.0f", id), game, string(savesJson))
+		if err != nil {
+			log.Fatalln(err)
+		}
+		log.Printf("saved %s with id %.0f", game, id)
+	}
+	waitGroup.Done()
 }
