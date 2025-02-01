@@ -65,7 +65,8 @@ func main() {
 		log.Printf("new batch of %d\n", CMLIMIT)
 		response, err := http.Get(baseurl.String())
 		if err != nil {
-			log.Fatalln(err)
+			log.Printf("Error: %s | Trying again\n", err)
+			continue
 		}
 		defer response.Body.Close()
 
@@ -76,7 +77,8 @@ func main() {
 		var data map[string]interface{}
 		err = json.Unmarshal(buf.Bytes(), &data)
 		if err != nil {
-			log.Fatalln(err)
+			log.Printf("Error: %s | Trying again\n", err)
+			continue
 		}
 		query := data["query"].(map[string]interface{})
 		catergorymembers := query["categorymembers"].([]interface{})
