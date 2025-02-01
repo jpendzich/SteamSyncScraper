@@ -82,8 +82,8 @@ func main() {
 		catergorymembers := query["categorymembers"].([]interface{})
 
 		var waitGroup sync.WaitGroup
-		waitGroup.Add(CMLIMIT)
-		for i := 0; i < CMLIMIT; i++ {
+		waitGroup.Add(len(catergorymembers))
+		for i := 0; i < len(catergorymembers); i++ {
 			member := catergorymembers[i].(map[string]interface{})
 			go saveGameSaveById(member["pageid"].(float64), member["title"].(string), &waitGroup) // use goroutine here to speed up query
 		}
@@ -103,7 +103,8 @@ func main() {
 func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 	baseurl, err := url.Parse(WIKIURL)
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 
 	params := baseurl.Query()
@@ -116,7 +117,8 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 
 	response, err := http.Get(baseurl.String())
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 	defer response.Body.Close()
 
@@ -127,7 +129,8 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 	var sectionsResponse map[string]interface{}
 	err = json.Unmarshal(buf.Bytes(), &sectionsResponse)
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 	parse := sectionsResponse["parse"].(map[string]interface{})
 	sections := parse["sections"].([]interface{})
@@ -156,7 +159,8 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 
 	response, err = http.Get(baseurl.String())
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 
 	buf = bytes.NewBuffer(nil)
@@ -165,7 +169,8 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 	var gameSavesResponse map[string]interface{}
 	err = json.Unmarshal(buf.Bytes(), &gameSavesResponse)
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 
 	parse = gameSavesResponse["parse"].(map[string]interface{})
@@ -174,7 +179,8 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 
 	regex, err := regexp.Compile("{{Game data\\/saves\\|(.*?)\\|(.*?)}}\\n")
 	if err != nil {
-		log.Fatalln(err)
+		waitGroup.Done()
+		return
 	}
 
 	matches := regex.FindAllStringSubmatch(text, -1)
@@ -195,14 +201,17 @@ func saveGameSaveById(id float64, game string, waitGroup *sync.WaitGroup) {
 	if gameHasAnySaves { //don't bother saving the game when it doesn't have any know save locations
 		savesJson, err := json.Marshal(saves)
 		if err != nil {
-			log.Fatalln(err)
+			waitGroup.Done()
+			return
 		}
 
 		_, err = db.Exec("INSERT INTO Saves VALUES(?, ?, ?)", fmt.Sprintf("%.0f", id), game, string(savesJson))
 		if err != nil {
-			log.Fatalln(err)
+			waitGroup.Done()
+			return
 		}
 		log.Printf("saved %s with id %.0f", game, id)
 	}
 	waitGroup.Done()
+	return
 }
